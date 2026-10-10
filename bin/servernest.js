@@ -14,6 +14,7 @@ function printUsage() {
   console.log('');
   console.log('Flags:');
   console.log('  --version, -V   Print version');
+  console.log('  --json          Output machine-readable JSON (doctor)');
 }
 
 async function main() {
@@ -43,37 +44,59 @@ async function main() {
     return;
   }
   if (cmd === 'doctor') {
+    const json = args.includes('--json');
     const db = require('../src/core/db');
-    console.log('ServerNest doctor');
+    const checks = [];
     const token = process.env.DISCORD_TOKEN;
     if (token) {
-      console.log('[OK] DISCORD_TOKEN is set');
+      checks.push({ name: 'DISCORD_TOKEN', level: 'ok', detail: 'DISCORD_TOKEN is set' });
     } else {
-      console.log('[WARN] DISCORD_TOKEN is not set (required for `start`, optional for doctor)');
+      checks.push({
+        name: 'DISCORD_TOKEN',
+        level: 'warn',
+        detail: 'DISCORD_TOKEN is not set (required for `start`, optional for doctor)'
+      });
     }
     const dir = db.getDataDir();
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.accessSync(dir, fs.constants.W_OK);
-      console.log(`[OK] data dir ${dir} writable`);
+      checks.push({ name: 'data dir', level: 'ok', detail: `data dir ${dir} writable` });
     } catch (err) {
-      console.log(`[FAIL] data dir ${dir} not writable: ${err.message}`);
-      process.exit(1);
+      checks.push({ name: 'data dir', level: 'fail', detail: `data dir ${dir} not writable: ${err.message}` });
     }
-    try {
-      db.migrate();
-      const rows = db.getDb().prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
-      const required = ['guilds', 'members', 'xp_roles', 'module_settings'];
-      const missing = required.filter((t) => !rows.includes(t));
-      if (missing.length > 0) {
-        console.log(`[FAIL] missing tables: ${missing.join(', ')}`);
-        process.exit(1);
+    const failed = () => checks.some((c) => c.level === 'fail');
+    if (!failed()) {
+      try {
+        db.migrate();
+        const rows = db.getDb().prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
+        const required = ['guilds', 'members', 'xp_roles', 'module_settings'];
+        const missing = required.filter((t) => !rows.includes(t));
+        if (missing.length > 0) {
+          checks.push({ name: 'schema', level: 'fail', detail: `missing tables: ${missing.join(', ')}` });
+        } else {
+          checks.push({ name: 'schema', level: 'ok', detail: `schema tables present: ${required.join(', ')}` });
+        }
+      } catch (err) {
+        checks.push({ name: 'schema', level: 'fail', detail: `schema check failed: ${err.message}` });
       }
-      console.log(`[OK] schema tables present: ${required.join(', ')}`);
-    } catch (err) {
-      console.log(`[FAIL] schema check failed: ${err.message}`);
-      process.exit(1);
     }
+    const healthy = !failed();
+    if (json) {
+      const payload = {
+        checks: checks.map((c) => ({ name: c.name, ok: c.level === 'ok', detail: c.detail })),
+        healthy
+      };
+      console.log(JSON.stringify(payload));
+      if (!healthy) process.exit(1);
+      return;
+    }
+    console.log('ServerNest doctor');
+    const tags = { ok: '[OK]', warn: '[WARN]', fail: '[FAIL]' };
+    for (const c of checks) {
+      console.log(`${tags[c.level]} ${c.detail}`);
+    }
+    if (!healthy) process.exit(1);
     console.log('Doctor OK');
     return;
   }
